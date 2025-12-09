@@ -185,3 +185,4 @@ cython_debug/
 *.xlsx
 *.xlsm
 *.json
+*.parquet

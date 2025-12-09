@@ -1,12 +1,12 @@
 """
-Header Hunter v5.0 - Utilities Module
+Header Hunter- Utilities Module
 Configuration management and resource path handling
 """
 import sys
 import os
 import json
 
-APP_TITLE = "Header Hunter v5.0 (Modular)"
+APP_TITLE = "Header Hunter v4.20 (Kowalski Protocol)"
 CONFIG_FILE = 'header_hunter_config.json'
 
 # Constant threshold values with clear meaning
@@ -15,18 +15,19 @@ DEFAULT_SILENCE_THRESHOLD = 999.0  # WOS value when no velocity data available
 DEFAULT_SETTINGS = {
     "cannabis_logic": {
         "hot_velocity": 2.0,           # Units/week threshold for "Hot" status
-        "reorder_point": 2.5,          # Minimum weeks-on-stock before reorder
+        "reorder_point": 2.5,          # Minimum weeks of stock before reorder
         "target_wos": 4.0,             # Target weeks of stock to maintain
         "dead_wos": 26,                # Weeks threshold for "Dead" classification
         "dead_on_hand": 5              # Minimum on-hand units for "Dead" status
     },
     "accessory_logic": {
-        "hot_velocity": 0.5,           # Lower threshold for accessories
-        "reorder_point": 4.0,
-        "target_wos": 8.0,             # Accessories held longer
-        "dead_wos": 52,                # Double the cannabis threshold
+        "hot_velocity": 0.5,           
+        "reorder_point": 4.0,          
+        "target_wos": 8.0,             
+        "dead_wos": 52,                
         "dead_on_hand": 3
     },
+    "history_folder": "",               # Optional folder for historical sales CSVs
     "column_mapping": {
         "sku": "SKU",
         "description": "Product Name",

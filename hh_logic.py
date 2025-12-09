@@ -1,5 +1,5 @@
 """
-Header Hunter v5.0 - Business Logic Module
+Header Hunter - Business Logic Module
 Core data processing and inventory status determination
 """
 import pandas as pd
@@ -12,6 +12,7 @@ import re
 import traceback
 from datetime import datetime
 from hh_utils import DEFAULT_SETTINGS, DEFAULT_SILENCE_THRESHOLD
+from hh_history import load_or_build_history, compute_rolling_velocities
 
 
 def clean_currency(val):
@@ -263,6 +264,28 @@ def run_logic_pandas(file_paths, settings, report_days, log_func, finished_callb
         
         log_func("Running Algorithms (Vectorized)...")
         
+        # === BUILD/LOAD HISTORY TABLE (optional) ===
+        history_folder = settings.get('history_folder', None)
+        
+        if history_folder:
+            log_func("📚 Loading sales history...")
+            df_history = load_or_build_history(
+                history_folder,
+                'sales_history',  # Will create sales_history.parquet and sales_history.csv
+                col_map,
+                log_func=log_func
+            )
+            
+            if df_history is not None:
+                history_available = True
+                log_func(f"✅ History loaded: {len(df_history)} records across {df_history['SKU'].nunique()} SKUs")
+            else:
+                history_available = False
+                log_func("⚠️ History unavailable, using single-period velocity only")
+        else:
+            history_available = False
+            log_func("ℹ️ No history folder configured, using single-period velocity")
+        
         # === 5. CALCULATE METRICS PER LOCATION ===
         master['Is_Accessory'] = ~master['SKU'].astype(str).str.upper().str.startswith("CNB-")
         master['Target_WOS'] = np.where(
@@ -331,6 +354,31 @@ def run_logic_pandas(file_paths, settings, report_days, log_func, finished_callb
             
             # Calculate velocity (units per week)
             master[f'{loc}_Vel'] = master[col_sold] / weeks_factor
+            
+            # Add historical velocities if available
+            if history_available:
+                vel_4w_list = []
+                vel_12w_list = []
+                trend_list = []
+                
+                for sku in master['SKU']:
+                    metrics = compute_rolling_velocities(
+                        df_history,
+                        sku,
+                        location=loc,
+                        as_of_date=None  # Uses today
+                    )
+                    vel_4w_list.append(metrics['vel_4w'])
+                    vel_12w_list.append(metrics['vel_12w'])
+                    trend_list.append(metrics['trend'])
+                
+                master[f'{loc}_Vel_4w'] = vel_4w_list
+                master[f'{loc}_Vel_12w'] = vel_12w_list
+                master[f'{loc}_Trend'] = trend_list
+                
+                # Use 4-week velocity for reorder logic; fall back to single-period if missing
+                use_vel = np.where(master[f'{loc}_Vel_4w'] > 0, master[f'{loc}_Vel_4w'], master[f'{loc}_Vel'])
+                master[f'{loc}_Vel'] = use_vel
             
             # Calculate weeks on stock
             master[f'{loc}_WOS'] = np.where(
@@ -419,6 +467,13 @@ def run_logic_pandas(file_paths, settings, report_days, log_func, finished_callb
             ('Vel', 'Vel', fmt_dec),
             ('WOS', 'WOS', fmt_dec)
         ]
+        
+        if history_available:
+            metrics.extend([
+                ('Vel(4w)', 'Vel_4w', fmt_dec),
+                ('Vel(12w)', 'Vel_12w', fmt_dec),
+                ('Trend', 'Trend', fmt_text),
+            ])
         
         for loc_name, fmt in loc_configs:
             for title, _, _ in metrics:

@@ -1,5 +1,5 @@
 """
-Header Hunter v5.0 - Main Entry Point
+Header Hunter - Main Entry Point
 Modular Inventory Management System
 """
 import tkinter as tk

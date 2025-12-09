@@ -339,6 +339,32 @@ class GreenlineApp:
         make_inp(lf_acc, "Target WOS (weeks):", 'a_target', a_rules.get('target_wos', 8.0), 2)
         make_inp(lf_acc, "Dead WOS (weeks):", 'a_dead_wos', a_rules.get('dead_wos', 52), 3)
         make_inp(lf_acc, "Dead Stock Threshold:", 'a_dead_oh', a_rules.get('dead_on_hand', 3), 4)
+
+        # History settings section
+        lf_hist = ttk.LabelFrame(top, text="History Settings", padding=10)
+        lf_hist.pack(fill=tk.X, padx=10, pady=5)
+        lf_hist.columnconfigure(1, weight=1)
+
+        curr_hist_folder = curr_sets.get('history_folder', '')
+
+        ttk.Label(lf_hist, text="Historical Data Folder:").grid(row=0, column=0, sticky='w', pady=2)
+        hist_entry = ttk.Entry(lf_hist)
+        hist_entry.insert(0, curr_hist_folder)
+        hist_entry.grid(row=0, column=1, sticky='ew', padx=5, pady=2)
+
+        def browse_history():
+            """Open folder browser for historical product-sales CSVs."""
+            folder = filedialog.askdirectory(title="Select folder with historical product-sales CSVs")
+            if folder:
+                hist_entry.delete(0, tk.END)
+                hist_entry.insert(0, folder)
+
+        ttk.Button(lf_hist, text="Browse", command=browse_history).grid(row=0, column=2, padx=5)
+        ttk.Label(
+            lf_hist,
+            text="(Where your product-sales-YYYY-MM-DD.csv files live)",
+            style="Sub.TLabel"
+        ).grid(row=1, column=0, columnspan=3, sticky='w', pady=2)
         
         def save_close():
             """Validate and save settings, then close dialog."""
@@ -362,6 +388,9 @@ class GreenlineApp:
                     'dead_wos': float(self.entry_widgets['a_dead_wos'].get()),
                     'dead_on_hand': float(self.entry_widgets['a_dead_oh'].get())
                 })
+
+                # Save history folder path
+                new_settings['history_folder'] = hist_entry.get()
                 
                 self.config_data['settings'] = new_settings
                 save_config(self.config_data)
