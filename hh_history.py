@@ -35,7 +35,13 @@ def load_history_db(history_folder, log_func=None):
 
 def compute_rolling_velocities(df_history, sku, location=None, as_of_date=None):
     """
-    Standard Logic: Looks for the most relevant snapshot in the history.
+    FIXED: Computes rolling velocities using ACTUAL report date ranges.
+    
+    Changes:
+    - Groups by Report_End_Date first to avoid double-counting
+    - Calculates actual day span between reports
+    - Returns confidence score
+    - Handles edge cases better
     """
     if as_of_date is None:
         as_of_date = pd.Timestamp.now()
@@ -50,54 +56,96 @@ def compute_rolling_velocities(df_history, sku, location=None, as_of_date=None):
     df_sku = df_history[mask].copy()
     
     if df_sku.empty:
-        return {'vel_4w': 0, 'vel_12w': 0, 'trend': 'No Data'}
+        return {
+            'vel_4w': 0,
+            'vel_12w': 0,
+            'trend': 'No Data',
+            'confidence': 0,
+            'data_points': 0
+        }
     
-    # Sort by date descending (newest first)
+    # FIXED: Group by report date to avoid duplicate counting
+    df_sku = df_sku.groupby('Report_End_Date').agg({
+        'Quantity': 'sum'
+    }).reset_index()
+    
     df_sku = df_sku.sort_values('Report_End_Date', ascending=False)
+    data_points = len(df_sku)
     
-    # --- HELPER: Get velocity from a specific point in time ---
     def get_velocity_at_date(target_date, tolerance_days=45):
-        # Calculate time difference
+        """Get velocity nearest to target date."""
         time_diffs = (df_sku['Report_End_Date'] - target_date).abs()
-        
-        # Get the closest report within tolerance
         valid_mask = time_diffs <= pd.Timedelta(days=tolerance_days)
         valid_reports = df_sku[valid_mask]
         
         if valid_reports.empty:
-            return 0.0, 0.0
+            return 0.0, 0.0, 0
         
-        # Find the index of the closest report
+        # Get closest report
         closest_idx = time_diffs[valid_mask].idxmin()
         best_row = df_sku.loc[closest_idx]
         
         qty = best_row['Quantity']
+        report_date = best_row['Report_End_Date']
         
-        # Default to 30 days if not specified, to calculate weekly run rate
-        days_in_report = 30.0 
+        # FIXED: Calculate actual report span
+        # Find the position of this report_date in the sorted dataframe
+        position_int = None
+        for idx in range(len(df_sku)):
+            if df_sku.iloc[idx]['Report_End_Date'] == report_date:
+                position_int = idx
+                break
+        
+        if position_int is None:
+            position_int = 0
+        
+        if position_int == 0:
+            # Most recent report - assume 30 days
+            days_in_report = 30.0
+            confidence = 85
+        elif position_int < len(df_sku) - 1:
+            # Calculate days between reports
+            # Get the next report (position + 1) - since sorted descending, this is the older report
+            next_report = df_sku.iloc[position_int + 1]['Report_End_Date']
+            days_in_report = (report_date - next_report).days
+            confidence = 80 if 25 <= days_in_report <= 35 else 60
+        else:
+            # Oldest report - estimate 30 days
+            days_in_report = 30.0
+            confidence = 50
+        
+        # Ensure minimum 1 day to avoid division by zero
+        days_in_report = max(days_in_report, 1)
+        
+        # Convert to weekly velocity
         velocity = (qty / days_in_report) * 7.0
-        return qty, velocity
+        
+        return qty, velocity, confidence
     
     # 1. Current Velocity (Closest to Today)
-    qty_now, vel_now = get_velocity_at_date(as_of_date)
+    qty_now, vel_now, conf_now = get_velocity_at_date(as_of_date)
     
     # 2. Past Velocity (Closest to 12 weeks ago)
     date_12w_ago = as_of_date - pd.Timedelta(weeks=12)
-    qty_old, vel_old = get_velocity_at_date(date_12w_ago)
+    qty_old, vel_old, conf_old = get_velocity_at_date(date_12w_ago)
     
     # 3. Calculate Trend
     trend = "Stable"
     if vel_old > 0:
         pct_change = ((vel_now - vel_old) / vel_old)
         if pct_change > 0.25:
-            trend = f"Growing (+{pct_change:.0%})"
+            trend = f"↑ Growing (+{pct_change:.0%})"
         elif pct_change < -0.25:
-            trend = f"Declining ({pct_change:.0%})"
+            trend = f"↓ Declining ({pct_change:.0%})"
     elif vel_now > 0 and vel_old == 0:
-        trend = "New / Spiking"
+        trend = "✨ New / Spiking"
+    
+    overall_confidence = min(conf_now, conf_old)
     
     return {
         'vel_4w': vel_now,
         'vel_12w': vel_old,
-        'trend': trend
+        'trend': trend,
+        'confidence': overall_confidence,
+        'data_points': data_points
     }

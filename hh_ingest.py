@@ -21,7 +21,16 @@ def extract_date(filename):
     return None
 
 def ingest_file(filepath, log_func=print):
-    """Reads a raw CSV, standardizes it, and prepares it for the bank."""
+    """
+    Reads a raw CSV, standardizes it, and prepares it for the bank.
+    
+    FIXED:
+    - Validates column headers exist
+    - Uses consistent SKU normalization
+    - Logs warnings for missing data
+    """
+    from hh_utils import normalize_sku, normalize_location, validate_column_mapping
+    
     config = load_config()
     col_map = config.get('settings', {}).get('column_mapping', {})
     
@@ -29,48 +38,68 @@ def ingest_file(filepath, log_func=print):
     report_date = extract_date(filename)
     
     if not report_date:
-        log_func(f"⚠️ SKIPPING: Could not find valid date range in {filename}")
+        log_func(f"⚠️ SKIPPING: Could not extract date range from {filename}")
         return None
-
+    
     log_func(f"📖 Reading Snapshot: {filename} (Date: {report_date.date()})")
     
     try:
         df = pd.read_csv(filepath)
         
-        # Map Columns
-        rename_map = {
-            col_map.get('sku', 'SKU'): 'SKU',
-            col_map.get('qty_sold', 'Quantity'): 'Quantity',
+        # FIXED: Validate columns exist
+        expected_keys = ['sku', 'qty_sold']
+        valid, missing, rename_map = validate_column_mapping(
+            df, col_map, expected_keys, log_func
+        )
+        
+        if not valid:
+            log_func(f"❌ Skipping {filename} - missing required columns")
+            return None
+        
+        # Add optional columns to rename map if they exist
+        optional_cols = {
             col_map.get('net_sales', 'Net sales'): 'Net_sales',
             col_map.get('gross_sales', 'Gross sales'): 'Gross_sales',
             col_map.get('profit', 'Profit'): 'Profit'
         }
-        actual_rename = {k: v for k, v in rename_map.items() if k in df.columns}
-        df.rename(columns=actual_rename, inplace=True)
+        for source_col, target_col in optional_cols.items():
+            if source_col in df.columns:
+                rename_map[source_col] = target_col
         
-        # Normalize
-        df['SKU'] = df['SKU'].astype(str).str.replace(r'\.0$', '', regex=True).str.upper()
+        # Rename with validated mapping
+        df.rename(columns=rename_map, inplace=True)
+        
+        # FIXED: Use consistent SKU normalization
+        df['SKU'] = df['SKU'].apply(normalize_sku)
+        df = df[df['SKU'].notna()]  # Remove invalid SKUs
+        
+        if len(df) == 0:
+            log_func(f"⚠️ No valid SKUs found in {filename}")
+            return None
+        
+        # Quantity
         df['Quantity'] = pd.to_numeric(df['Quantity'], errors='coerce').fillna(0)
         
-        # Location
+        # FIXED: Better location detection
         if 'Location' in df.columns:
-            def clean_loc(x):
-                s = str(x).lower()
-                if 'hill' in s: return 'Hill'
-                if 'valley' in s: return 'Valley'
-                if 'jasper' in s: return 'Jasper'
-                return 'Other'
-            df['Location'] = df['Location'].apply(clean_loc)
-        else:
-            df['Location'] = 'Other'
+            df['Location'] = df['Location'].apply(normalize_location)
             
-        # Stamp Time
+            # Log unmapped locations
+            unmapped = df[df['Location'].str.contains('UNMAPPED', na=False)]
+            if len(unmapped) > 0:
+                log_func(f"   ⚠️  {len(unmapped)} records with unmapped locations")
+        else:
+            log_func(f"   ⚠️  No Location column found - setting to 'Other'")
+            df['Location'] = 'Other'
+        
+        # Timestamp
         df['Report_End_Date'] = report_date
         
-        # Filter Columns
-        keep_cols = ['SKU', 'Quantity', 'Location', 'Report_End_Date', 'Net_sales', 'Gross_sales', 'Profit']
+        # Filter columns
+        keep_cols = ['SKU', 'Quantity', 'Location', 'Report_End_Date', 
+                     'Net_sales', 'Gross_sales', 'Profit']
         return df[[c for c in keep_cols if c in df.columns]]
-
+    
     except Exception as e:
         log_func(f"❌ Error processing {filename}: {e}")
         return None

@@ -10,7 +10,7 @@ import subprocess
 import re
 import traceback
 from datetime import datetime
-from hh_utils import DEFAULT_SETTINGS, DEFAULT_SILENCE_THRESHOLD
+from hh_utils import DEFAULT_SETTINGS, DEFAULT_SILENCE_THRESHOLD, normalize_sku, normalize_location
 # UPDATED IMPORT:
 from hh_history import load_history_db, compute_rolling_velocities
 
@@ -28,8 +28,8 @@ def clean_currency(val):
         return 0.0
 
 
-def determine_status_vectorized(row, rules_can, rules_acc):
-    """Determine inventory status."""
+def determine_status_vectorized(row, rules_can, rules_acc, location=None):
+    """Determine inventory status with location context."""
     is_acc = row['Is_Accessory']
     rules = rules_acc if is_acc else rules_can
     
@@ -80,9 +80,23 @@ def run_logic_pandas(file_paths, settings, report_days, log_func, finished_callb
     try:
         log_func("--- Starting Analysis (Fixed v5.2) ---")
         
+        # Validate inputs
+        from hh_utils import validate_column_mapping
+        
         rules_cannabis = settings.get('cannabis_logic', DEFAULT_SETTINGS['cannabis_logic'])
         rules_accessory = settings.get('accessory_logic', DEFAULT_SETTINGS['accessory_logic'])
         col_map = settings.get('column_mapping', DEFAULT_SETTINGS['column_mapping'])
+        
+        required_cols = ['sku', 'qty_sold']
+        
+        # Check that mappings exist
+        for req in required_cols:
+            if req not in col_map or not col_map[req]:
+                log_func(f"❌ FATAL: Column mapping missing '{req}'")
+                finished_callback(False)
+                return
+        
+        log_func("✅ Validation passed - beginning analysis...")
         
         try: days = float(report_days)
         except: days = 30
@@ -105,7 +119,8 @@ def run_logic_pandas(file_paths, settings, report_days, log_func, finished_callb
         if file_paths['aglc']:
             try:
                 df_aglc = pd.read_excel(file_paths['aglc'], header=10, engine='openpyxl')
-                df_aglc['SKU'] = df_aglc['AGLC SKU'].astype(str).str.replace(r'\.0$', '', regex=True)
+                df_aglc['SKU'] = df_aglc['AGLC SKU'].apply(normalize_sku)
+                df_aglc = df_aglc[df_aglc['SKU'].notna()]  # Remove invalid SKUs
                 df_aglc['Case_Size'] = pd.to_numeric(df_aglc['EachesPerCase'], errors='coerce').fillna(1)
                 df_aglc = df_aglc[['SKU', 'Case_Size']].drop_duplicates(subset=['SKU'])
             except:
@@ -119,15 +134,17 @@ def run_logic_pandas(file_paths, settings, report_days, log_func, finished_callb
             if col in df_sales.columns:
                 df_sales[col] = df_sales[col].apply(clean_currency)
         
+        # FIXED: Use consistent location normalization
         if 'Location' in df_sales.columns:
-            def normalize_loc(loc):
-                s_loc = str(loc)
-                if 'Hill' in s_loc: return 'Hill'
-                if 'Valley' in s_loc: return 'Valley'
-                if 'Jasper' in s_loc: return 'Jasper'
-                return 'Other'
-            df_sales['Loc_Key'] = df_sales['Location'].apply(normalize_loc)
+            df_sales['Loc_Key'] = df_sales['Location'].apply(normalize_location)
+            
+            # Log unmapped locations
+            unmapped = df_sales[df_sales['Loc_Key'].str.contains('UNMAPPED', na=False)]
+            if len(unmapped) > 0:
+                log_func(f"⚠️  {len(unmapped)} sales records have unmapped locations:")
+                log_func(f"   Examples: {unmapped['Location'].unique()[:5]}")
         else:
+            log_func("⚠️  No Location column in sales data - treating as 'Other'")
             df_sales['Loc_Key'] = 'Other'
             
         pivot_sales = df_sales.pivot_table(
@@ -137,13 +154,60 @@ def run_logic_pandas(file_paths, settings, report_days, log_func, finished_callb
         ).fillna(0)
         pivot_sales.columns = [f"{c[0]}_{c[1]}" for c in pivot_sales.columns]
         
+        # === ADD: Create pivot tables for ALL sales metrics per location ===
+        # Dictionary to store all pivoted metrics
+        sales_pivots = {}
+        
+        # Metrics to capture: quantity, profit, net sales, gross sales
+        metric_columns = {
+            'qty_sold': col_map.get('qty_sold', 'Quantity'),
+            'profit': col_map.get('profit', 'Profit'),
+            'net_sales': col_map.get('net_sales', 'Net sales'),
+            'gross_sales': col_map.get('gross_sales', 'Gross sales')
+        }
+        
+        # Create pivot for each metric
+        for metric_key, metric_col in metric_columns.items():
+            if metric_col in df_sales.columns:
+                pivot_temp = df_sales.pivot_table(
+                    index=col_map['sku'],
+                    columns='Loc_Key',
+                    values=metric_col,
+                    aggfunc='sum'
+                ).fillna(0)
+                
+                # Store each location's data with metric in column name
+                for loc in ['Hill', 'Valley', 'Jasper']:
+                    if loc in pivot_temp.columns:
+                        col_name = f"{metric_key}_{loc}"
+                        sales_pivots[col_name] = pivot_temp[loc]
+        
+        # Convert to DataFrame for merging
+        sales_metrics_df = pd.DataFrame(sales_pivots)
+        
         # === 3. MERGE ===
+        # FIXED: Use consistent SKU normalization
         master = df_inv.copy()
         if col_map['inventory_sku'] != 'SKU':
             master.rename(columns={col_map['inventory_sku']: 'SKU'}, inplace=True)
-        master['SKU'] = master['SKU'].astype(str).str.replace(r'\.0$', '', regex=True).str.upper()
+        master['SKU'] = master['SKU'].apply(normalize_sku)
+        invalid_skus = master[master['SKU'].isna()]
+        if len(invalid_skus) > 0:
+            log_func(f"⚠️  {len(invalid_skus)} rows have invalid SKUs")
+            master = master[master['SKU'].notna()]
         
         master = pd.merge(master, pivot_sales, left_on='SKU', right_index=True, how='left').fillna(0)
+        
+        # === Merge all sales metrics into master ===
+        if not sales_metrics_df.empty:
+            master = master.merge(
+                sales_metrics_df,
+                left_on='SKU',
+                right_index=True,
+                how='left'
+            ).fillna(0)
+            log_func(f"✓ Added {len(sales_metrics_df.columns)} sales metric columns")
+        
         master = pd.merge(master, df_aglc, on='SKU', how='left')
         master['Case_Size'] = master['Case_Size'].fillna(1)
         
@@ -153,7 +217,8 @@ def run_logic_pandas(file_paths, settings, report_days, log_func, finished_callb
             sku_c = 'SKU' if 'SKU' in df.columns else col_map['sku']
             qty_c = 'Quantity' if 'Quantity' in df.columns else col_map['qty_sold']
             if sku_c in df.columns and qty_c in df.columns:
-                df[sku_c] = df[sku_c].astype(str).str.replace(r'\.0$', '', regex=True).str.upper()
+                df[sku_c] = df[sku_c].apply(normalize_sku)
+                df = df[df[sku_c].notna()]  # Remove invalid SKUs
                 df[qty_c] = df[qty_c].apply(clean_currency)
                 return df.groupby(sku_c)[qty_c].sum().rename(name)
             return pd.Series(dtype=float, name=name)
@@ -241,10 +306,11 @@ def run_logic_pandas(file_paths, settings, report_days, log_func, finished_callb
                 'Incoming_Num': master[f'{loc}_Inc_Num'],
                 'Is_Accessory': master['Is_Accessory']
             })
-            master[f'{loc}_Status'] = temp_df.apply(lambda r: determine_status_vectorized(r, rules_cannabis, rules_accessory), axis=1)
+            master[f'{loc}_Status'] = temp_df.apply(lambda r: determine_status_vectorized(r, rules_cannabis, rules_accessory, location=loc), axis=1)
             master[f'{loc}_Sold'] = master[col_sold]
         
-        # === 6. EXPORT ===
+        # === 6. EXPORT - WITH EXCEL OUTLINE GROUPING (EXACTLY AS SHOWN) ===
+        
         output_filename = f'Order_Rec_{datetime.now().strftime("%Y-%m-%d")}.xlsx'
         log_func(f"Writing {output_filename}...")
         
@@ -252,53 +318,168 @@ def run_logic_pandas(file_paths, settings, report_days, log_func, finished_callb
         workbook = writer.book
         sheet = workbook.add_worksheet("Order Builder")
         
-        fmt_head = workbook.add_format({'bold': True, 'bg_color': '#D3D3D3', 'border': 1})
-        fmt_norm = workbook.add_format({'border': 1})
-        fmt_dec = workbook.add_format({'num_format': '0.00', 'border': 1})
-        fmt_buy = workbook.add_format({'bold': True, 'bg_color': '#FFFF00', 'border': 1, 'align': 'center'})
+        # === FORMAT DEFINITIONS ===
+        fmt_head = workbook.add_format({
+            'bold': True,
+            'bg_color': '#2F5496',
+            'font_color': '#FFFFFF',
+            'border': 1,
+            'align': 'center',
+            'valign': 'vcenter'
+        })
         
-        cols = ['SKU', 'Product Name', 'Category', 'Brand', 'Case_Size']
-        locs = [('Hill', '#B4C6E7'), ('Valley', '#F8CBAD'), ('Jasper', '#C6E0B4')]
+        fmt_norm = workbook.add_format({'border': 1, 'align': 'left'})
+        fmt_dec = workbook.add_format({'num_format': '0.00', 'border': 1, 'align': 'right'})
+        fmt_currency = workbook.add_format({'num_format': '$#,##0.00', 'border': 1, 'align': 'right'})
+        fmt_buy = workbook.add_format({
+            'bold': True,
+            'bg_color': '#FFFF00',
+            'border': 1,
+            'align': 'center'
+        })
         
-        c = 0
-        for h in ["Key"] + cols:
-            sheet.write(0, c, h, fmt_head); c += 1
-            
-        for lname, color in locs:
-            fmt_loc = workbook.add_format({'bold': True, 'bg_color': color, 'border': 1})
-            metrics_list = ['Status', 'Buy(Cs)', 'Inc', 'Sold', 'Stock', 'Vel', 'WOS']
-            if history_available: metrics_list.append('Trend')
-            for m in metrics_list:
-                sheet.write(0, c, f"{lname} {m}", fmt_loc); c += 1
-                
+        # Product columns and all metrics per location
+        product_cols = ['SKU', 'Product Name', 'Category', 'Brand', 'Case_Size']
+        locations = ['Hill', 'Valley', 'Jasper']
+        metrics_per_location = ['Status', 'Buy(Cs)', 'Inc', 'Sold', 'Profit', 'Net Sales', 'Gross Sales', 'Stock', 'Vel', 'WOS']
+        if history_available:
+            metrics_per_location.append('Trend')
+        
+        # === SET COLUMN WIDTHS ===
+        sheet.set_column('A:A', 12)   # SKU
+        sheet.set_column('B:B', 22)   # Product Name
+        sheet.set_column('C:C', 12)   # Category
+        sheet.set_column('D:D', 12)   # Brand
+        sheet.set_column('E:E', 10)   # Case_Size
+        
+        # Metric columns - auto width
+        for col_offset in range(len(locations) * len(metrics_per_location)):
+            col_num = 5 + col_offset
+            sheet.set_column(col_num, col_num, 11)
+        
+        # === WRITE HEADER ROW ===
+        col_idx = 0
+        
+        # Product columns
+        for h in product_cols:
+            sheet.write(0, col_idx, h, fmt_head)
+            col_idx += 1
+        
+        # Metrics headers - ONE ROW showing all metrics for all locations
+        for loc in locations:
+            for metric in metrics_per_location:
+                sheet.write(0, col_idx, f"{loc} {metric}", fmt_head)
+                col_idx += 1
+        
+        # === WRITE DATA ROWS ===
         for r, row in master.iterrows():
-            xls_r = r + 1; c = 0
-            sheet.write(xls_r, c, "", fmt_norm); c += 1 # Key
-            for col in cols:
-                sheet.write(xls_r, c, row.get(col, ""), fmt_norm); c += 1
+            xls_r = r + 1  # Start at row 1 (after header)
+            col_idx = 0
+            
+            # Product columns
+            for col in product_cols:
+                val = row.get(col, "")
+                sheet.write(xls_r, col_idx, val, fmt_norm)
+                col_idx += 1
+            
+            # ONE ROW - all location data left to right
+            for loc in locations:
+                # Status
+                status = row.get(f"{loc}_Status", "-")
+                sheet.write(xls_r, col_idx, status, fmt_norm)
+                col_idx += 1
                 
-            for lname, _ in locs:
-                sheet.write(xls_r, c, row.get(f"{lname}_Status", "-"), fmt_norm); c+=1
-                buy_val = row.get(f"{lname}_SOQ", 0)
-                if buy_val > 0: sheet.write(xls_r, c, buy_val, fmt_buy)
-                else: sheet.write(xls_r, c, "-", fmt_norm)
-                c+=1
-                sheet.write(xls_r, c, row.get(f"{lname}_Inc_Str", "-"), fmt_norm); c+=1
-                sheet.write(xls_r, c, row.get(f"{lname}_Sold", 0), fmt_norm); c+=1
-                sheet.write(xls_r, c, row.get(f"{lname}_Stock", 0), fmt_norm); c+=1
-                sheet.write(xls_r, c, row.get(f"{lname}_Vel", 0), fmt_dec); c+=1
-                wos_val = row.get(f"{lname}_WOS", 0)
-                if wos_val >= DEFAULT_SILENCE_THRESHOLD: sheet.write(xls_r, c, "∞", fmt_norm)
-                else: sheet.write(xls_r, c, wos_val, fmt_dec)
-                c+=1
+                # Buy(Cs)
+                buy_val = row.get(f"{loc}_SOQ", 0)
+                if buy_val > 0:
+                    sheet.write(xls_r, col_idx, buy_val, fmt_buy)
+                else:
+                    sheet.write(xls_r, col_idx, "-", fmt_norm)
+                col_idx += 1
+                
+                # Inc
+                inc_str = row.get(f"{loc}_Inc_Str", "-")
+                sheet.write(xls_r, col_idx, inc_str, fmt_norm)
+                col_idx += 1
+                
+                # Sold
+                sold = row.get(f"qty_sold_{loc}", row.get(f"{loc}_Sold", 0))
+                sheet.write(xls_r, col_idx, sold, fmt_dec)
+                col_idx += 1
+                
+                # Profit
+                profit = row.get(f"profit_{loc}", 0)
+                sheet.write(xls_r, col_idx, profit, fmt_currency)
+                col_idx += 1
+                
+                # Net Sales
+                net_sales = row.get(f"net_sales_{loc}", 0)
+                sheet.write(xls_r, col_idx, net_sales, fmt_currency)
+                col_idx += 1
+                
+                # Gross Sales
+                gross_sales = row.get(f"gross_sales_{loc}", 0)
+                sheet.write(xls_r, col_idx, gross_sales, fmt_currency)
+                col_idx += 1
+                
+                # Stock
+                stock = row.get(f"{loc}_Stock", 0)
+                sheet.write(xls_r, col_idx, stock, fmt_dec)
+                col_idx += 1
+                
+                # Velocity
+                vel = row.get(f"{loc}_Vel", 0)
+                sheet.write(xls_r, col_idx, vel, fmt_dec)
+                col_idx += 1
+                
+                # WOS
+                wos = row.get(f"{loc}_WOS", 0)
+                if wos >= DEFAULT_SILENCE_THRESHOLD:
+                    sheet.write(xls_r, col_idx, "∞", fmt_norm)
+                else:
+                    sheet.write(xls_r, col_idx, wos, fmt_dec)
+                col_idx += 1
+                
+                # Trend (if available)
                 if history_available:
-                    sheet.write(xls_r, c, row.get(f"{lname}_Trend", "-"), fmt_norm); c+=1
-
-        sheet.freeze_panes(1, 6)
-        writer.close()
-        try: os.startfile(output_filename)
-        except: subprocess.call(['open', output_filename])
+                    trend = row.get(f"{loc}_Trend", "-")
+                    sheet.write(xls_r, col_idx, trend, fmt_norm)
+                    col_idx += 1
         
+        # === SET UP OUTLINE GROUPING ===
+        # This creates the +/- collapse buttons on the left margin
+        
+        product_col_count = len(product_cols)
+        metrics_count = len(metrics_per_location)
+        
+        # For each location, group its columns together
+        # Set outline levels: Status is level 1 (always visible), other metrics are level 2 (collapsible)
+        for loc_num, loc in enumerate(locations):
+            group_start = product_col_count + (loc_num * metrics_count)
+            
+            # Status column (always visible when collapsed) - level 1
+            sheet.set_column(group_start, group_start, None, None, {'level': 1, 'collapsed': False})
+            
+            # All other metrics for this location - level 2 (can be collapsed)
+            for metric_idx in range(1, metrics_count):
+                col_num = group_start + metric_idx
+                sheet.set_column(col_num, col_num, None, None, {'level': 2, 'collapsed': False})
+        
+        # Set outline display - show outline controls, default to level 1 (shows Status only when collapsed)
+        sheet.outline_settings(True, False, False, True)
+        
+        # Freeze panes (keep product columns visible)
+        sheet.freeze_panes(1, len(product_cols))
+        
+        writer.close()
+        
+        try:
+            os.startfile(output_filename)
+        except:
+            subprocess.call(['open', output_filename])
+        
+        log_func(f"✅ Report saved: {output_filename}")
+        log_func(f"   Tip: Use +/- buttons on LEFT to collapse/expand each location group!")
         finished_callback(True)
         
     except Exception as e:
