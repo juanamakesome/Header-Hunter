@@ -1,327 +1,295 @@
 """
-Header Hunter v5.4 - GUI Module
-Added: Configuration for Downloads/Ingest Folder
+Blaze Buddy - GUI Module
+
+Enterprise Edition
 """
+
 import tkinter as tk
 from tkinter import ttk, filedialog, scrolledtext, messagebox
 import threading
 import queue
 import os
 from datetime import datetime
-from hh_utils import APP_TITLE, DEFAULT_SETTINGS, resource_path, load_config, save_config
-from hh_logic import run_logic_pandas
-import hh_ingest
+from bb_config_manager import ConfigManager
+from bb_utils import APP_TITLE, resource_path
+from bb_logic import run_logic_pandas
+import bb_ingest
 
+# --- CORPORATE THEME PALETTE ---
+THEME = {
+    "primary": "#2E8B57",    # SeaGreen (The "Greenline" Brand)
+    "secondary": "#E0E0E0",  # Light Gray background
+    "accent": "#4682B4",     # SteelBlue for interactions
+    "text_dark": "#333333",  # Soft black
+    "text_light": "#FFFFFF", # White
+    "bg_main": "#F5F5F5",    # Very light gray app background
+    "font_main": "Segoe UI",
+}
 
 class GreenlineApp:
-    
     def __init__(self, root):
         self.root = root
         self.root.title(APP_TITLE)
-        self.root.geometry("850x900")
+        self.root.geometry("900x950") # Slightly taller for the new look
+        self.config = ConfigManager()
         
+        # Load Icon
         try:
-            icon_path = resource_path("icon.ico")
-            if os.path.exists(icon_path):
-                self.root.iconbitmap(icon_path)
-        except: pass
+            icon = resource_path("icon.ico")
+            if os.path.exists(icon): self.root.iconbitmap(icon)
+        except (FileNotFoundError, OSError, tk.TclError):
+            pass
         
-        style = ttk.Style()
-        style.theme_use('clam')
-        style.configure("TButton", padding=6, font=('Segoe UI', 10))
-        style.configure("Header.TLabel", font=('Segoe UI', 18, 'bold'), foreground="#2E8B57")
-        style.configure("Sub.TLabel", font=('Segoe UI', 9), foreground="#666666")
+        # --- APPLY NEW THEME ---
+        self.apply_theme()
         
-        self.files = {
-            'inventory': tk.StringVar(), 'sales': tk.StringVar(), 'po': tk.StringVar(),
-            'aglc': tk.StringVar(), 'hill': tk.StringVar(), 'valley': tk.StringVar(), 'jasper': tk.StringVar()
-        }
-        self.report_days = tk.StringVar(value="30")
-        self.config_data = load_config()
-        
-        paths = self.config_data.get('paths', {})
-        for k, v in paths.items():
+        # Data vars (Workflow remains identical)
+        self.files = {k: tk.StringVar() for k in ['inventory', 'sales', 'po', 'aglc']}
+        self.loc_files = {}
+        for loc in self.config.get_locations(active_only=True):
+            self.loc_files[loc['id']] = tk.StringVar()
+            
+        # Load saved paths
+        saved_paths = self.config.get_paths()
+        for k, v in saved_paths.items():
             if k in self.files: self.files[k].set(v)
-        
+            if k in self.loc_files: self.loc_files[k].set(v)
+            
+        self.report_days = tk.StringVar(value="30")
         self.log_queue = queue.Queue()
+        
         self.create_widgets()
         self._process_log_queue()
-    
-    def create_widgets(self):
-        header = ttk.Frame(self.root, padding="20")
-        header.pack(fill=tk.X)
+
+    def apply_theme(self):
+        """Injects the 'Enterprise' look and feel."""
+        style = ttk.Style()
+        style.theme_use('clam') # Good base for customization
         
-        try:
-            logo_path = resource_path("logo.png")
-            if os.path.exists(logo_path):
-                img = tk.PhotoImage(file=logo_path)
-                if img.width() > 100: img = img.subsample(int(img.width() / 100))
-                self.logo_img = img
-                ttk.Label(header, image=self.logo_img).pack(side=tk.LEFT, padx=10)
-        except: pass
+        # Global Font
+        default_font = (THEME['font_main'], 10)
+        header_font = (THEME['font_main'], 22, "bold")
+        sub_font = (THEME['font_main'], 10, "italic")
         
-        title_box = ttk.Frame(header)
-        title_box.pack(side=tk.LEFT, padx=10)
-        ttk.Label(title_box, text=APP_TITLE, style="Header.TLabel").pack(anchor='w')
-        ttk.Label(title_box, text="Modular Intelligence System", style="Sub.TLabel").pack(anchor='w')
+        # Configure Colors & Fonts
+        style.configure(".", background=THEME['bg_main'], font=default_font, foreground=THEME['text_dark'])
         
-        btn_box = ttk.Frame(header)
-        btn_box.pack(side=tk.RIGHT)
+        # Frames
+        style.configure("TFrame", background=THEME['bg_main'])
+        
+        # Header Style (The "Corporate" Top Bar)
+        style.configure("Brand.TFrame", background=THEME['primary'])
+        style.configure("Brand.TLabel", background=THEME['primary'], foreground=THEME['text_light'], font=header_font)
+        style.configure("BrandSub.TLabel", background=THEME['primary'], foreground="#D3D3D3", font=sub_font)
         
         # Buttons
-        ttk.Button(btn_box, text="📥 Ingest Data", command=self.run_ingest_thread).pack(fill=tk.X, pady=2)
-        ttk.Button(btn_box, text="📂 Auto-Load", command=self.auto_load_folder).pack(fill=tk.X, pady=2)
-        ttk.Button(btn_box, text="⚙️ Settings", command=self.open_settings).pack(fill=tk.X, pady=2)
+        style.configure("TButton", padding=6, font=(THEME['font_main'], 10, 'bold'))
+        style.map("TButton",
+            background=[('active', THEME['accent']), ('!disabled', THEME['secondary'])],
+            foreground=[('active', THEME['text_light']), ('!disabled', THEME['text_dark'])]
+        )
         
-        main_frame = ttk.Frame(self.root, padding=20)
-        main_frame.pack(fill=tk.BOTH, expand=True)
+        # The "Run" Button (Big & distinct)
+        style.configure("Action.TButton", font=(THEME['font_main'], 12, 'bold'), background=THEME['primary'], foreground=THEME['text_light'])
+        style.map("Action.TButton", background=[('active', '#1E5E3A')]) # Darker green on hover
+
+        # LabelFrames (Groups)
+        style.configure("TLabelframe", background=THEME['bg_main'], borderwidth=2, relief="groove")
+        style.configure("TLabelframe.Label", background=THEME['bg_main'], foreground=THEME['primary'], font=(THEME['font_main'], 11, 'bold'))
+
+    def create_widgets(self):
+        # --- 1. THE BRAND HEADER ---
+        # This solid color block replaces the old plain text header
+        hdr = ttk.Frame(self.root, style="Brand.TFrame", padding="20")
+        hdr.pack(fill=tk.X)
         
-        f_params = ttk.LabelFrame(main_frame, text="Run Parameters", padding=10)
-        f_params.pack(fill=tk.X, pady=5)
-        ttk.Label(f_params, text="Days of Sales Data:").pack(side=tk.LEFT)
-        ttk.Entry(f_params, textvariable=self.report_days, width=5).pack(side=tk.LEFT, padx=5)
-        ttk.Label(f_params, text="(Used for velocity calc)").pack(side=tk.LEFT)
+        # Logo/Title Area
+        title_box = ttk.Frame(hdr, style="Brand.TFrame")
+        title_box.pack(side=tk.LEFT)
         
-        lf_req = ttk.LabelFrame(main_frame, text="Required Files", padding=10)
-        lf_req.pack(fill=tk.X, pady=5)
-        self.make_file_row(lf_req, "Inventory Export:", 'inventory')
-        self.make_file_row(lf_req, "Sales Data:", 'sales')
-        self.make_file_row(lf_req, "Purchase Order:", 'po')
-        self.make_file_row(lf_req, "AGLC Manual Form:", 'aglc')
+        ttk.Label(title_box, text=APP_TITLE.upper(), style="Brand.TLabel").pack(anchor='w')
+        ttk.Label(title_box, text="Inventory Intelligence Suite v2.0", style="BrandSub.TLabel").pack(anchor='w')
         
-        lf_trans = ttk.LabelFrame(main_frame, text="Pending Transfers", padding=10)
-        lf_trans.pack(fill=tk.X, pady=5)
-        self.make_file_row(lf_trans, "To Hill:", 'hill')
-        self.make_file_row(lf_trans, "To Valley:", 'valley')
-        self.make_file_row(lf_trans, "To Jasper:", 'jasper')
+        # Utility Buttons (Top Right, lighter touch)
+        btns = ttk.Frame(hdr, style="Brand.TFrame")
+        btns.pack(side=tk.RIGHT)
+        ttk.Button(btns, text="⚙️ Config", command=self.open_settings).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(btns, text="📥 Sync", command=self.run_ingest).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(btns, text="📂 Load", command=self.auto_load).pack(side=tk.RIGHT, padx=5)
+
+        # --- 2. MAIN DASHBOARD ---
+        main = ttk.Frame(self.root, padding="25")
+        main.pack(fill=tk.BOTH, expand=True)
         
-        self.progress = ttk.Progressbar(main_frame, orient="horizontal", mode="indeterminate")
-        self.progress.pack(fill=tk.X, pady=(20, 5))
+        # Section: Parameters
+        fp = ttk.LabelFrame(main, text=" ANALYSIS PARAMETERS ", padding="15")
+        fp.pack(fill=tk.X, pady=(0, 15))
         
-        self.run_btn = ttk.Button(main_frame, text="Kolwalski, Analysis! 🐧", command=self.start_processing)
-        self.run_btn.pack(fill=tk.X, ipady=10)
+        p_row = ttk.Frame(fp)
+        p_row.pack(fill=tk.X)
+        ttk.Label(p_row, text="Sales History Range (Days):").pack(side=tk.LEFT)
+        ttk.Entry(p_row, textvariable=self.report_days, width=8).pack(side=tk.LEFT, padx=10)
+        ttk.Label(p_row, text="(Standard: 30)", foreground="#888").pack(side=tk.LEFT)
+
+        # Section: Source Data
+        lfr = ttk.LabelFrame(main, text=" SOURCE DATA ", padding="15")
+        lfr.pack(fill=tk.X, pady=(0, 15))
+        self.make_row(lfr, "Inventory Export", self.files['inventory'], 'inventory')
+        self.make_row(lfr, "Sales Report", self.files['sales'], 'sales')
+        self.make_row(lfr, "Purchase Order", self.files['po'], 'po')
+        self.make_row(lfr, "AGLC Manual", self.files['aglc'], 'aglc')
+
+        # Section: Logistics (Dynamic)
+        lft = ttk.LabelFrame(main, text=" LOGISTICS & TRANSFERS ", padding="15")
+        lft.pack(fill=tk.X, pady=(0, 20))
         
-        log_lf = ttk.LabelFrame(main_frame, text="System Log", padding=5)
-        log_lf.pack(fill=tk.BOTH, expand=True, pady=10)
-        self.log_area = scrolledtext.ScrolledText(log_lf, height=8, font=('Consolas', 9), state='disabled')
-        self.log_area.pack(fill=tk.BOTH, expand=True)
-    
-    def make_file_row(self, parent, label, key):
-        f = ttk.Frame(parent)
-        f.pack(fill=tk.X, pady=2)
-        ttk.Label(f, text=label, width=18).pack(side=tk.LEFT)
-        ttk.Entry(f, textvariable=self.files[key]).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-        ttk.Button(f, text="...", width=4, command=lambda: self.browse(key)).pack(side=tk.RIGHT)
-    
-    def browse(self, key):
-        path = filedialog.askopenfilename(filetypes=[("Data Files", "*.csv *.xlsx *.xlsm"), ("All", "*.*")])
+        locs = self.config.get_locations(active_only=True)
+        if locs:
+            for loc in locs:
+                self.make_row(lft, f"To {loc['name']}", self.loc_files[loc['id']], loc['id'])
+        else:
+             ttk.Label(lft, text="No active locations configured.", foreground="red").pack()
+
+        # --- 3. EXECUTION ZONE ---
+        # The button is now styled differently ("Action.TButton") to stand out
+        self.btn_run = ttk.Button(main, text="GENERATE ORDER RECOMMENDATIONS 🚀", style="Action.TButton", command=self.start_run)
+        self.btn_run.pack(fill=tk.X, ipady=12, pady=(0, 15))
+        
+        self.prog = ttk.Progressbar(main, mode='indeterminate')
+        self.prog.pack(fill=tk.X, pady=(0,15))
+        
+        # Log Console
+        lfl = ttk.LabelFrame(main, text=" SYSTEM LOG ", padding="10")
+        lfl.pack(fill=tk.BOTH, expand=True)
+        
+        self.log_txt = scrolledtext.ScrolledText(lfl, height=8, state='disabled', font=("Consolas", 9))
+        self.log_txt.pack(fill=tk.BOTH, expand=True)
+        self.log_txt.configure(background="#F0F0F0", foreground="#333333")
+
+    def make_row(self, p, lbl, var, key):
+        f = ttk.Frame(p)
+        f.pack(fill=tk.X, pady=4)
+        ttk.Label(f, text=lbl, width=18, anchor="w").pack(side=tk.LEFT)
+        e = ttk.Entry(f, textvariable=var)
+        e.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        ttk.Button(f, text="Browse", width=8, command=lambda: self.browse(var, key)).pack(side=tk.RIGHT)
+
+    def browse(self, var, key):
+        path = filedialog.askopenfilename()
         if path:
-            self.files[key].set(path)
+            var.set(path)
             self.save_paths()
-    
-    def log(self, msg):
-        self.log_queue.put(msg)
+
+    def save_paths(self):
+        paths = {k: v.get() for k, v in self.files.items()}
+        paths.update({k: v.get() for k, v in self.loc_files.items()})
+        self.config.update_paths(paths)
+
+    def log(self, msg): self.log_queue.put(msg)
     
     def _process_log_queue(self):
         try:
             while True:
                 msg = self.log_queue.get_nowait()
-                self.log_area.config(state='normal')
+                self.log_txt.config(state='normal')
                 ts = datetime.now().strftime('%H:%M:%S')
-                self.log_area.insert(tk.END, f"[{ts}] {msg}\n")
-                self.log_area.see(tk.END)
-                self.log_area.config(state='disabled')
-        except queue.Empty: pass
-        self.root.after(100, self._process_log_queue)
-    
-    def save_paths(self):
-        self.config_data['paths'] = {k: v.get() for k, v in self.files.items()}
-        save_config(self.config_data)
-    
-    def peek_transfer_location(self, filepath):
-        try:
-            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-                content = f.read(4096).lower()
-                scores = {'hill': content.count('hill'), 'valley': content.count('valley'), 'jasper': content.count('jasper')}
-                best_loc = max(scores, key=scores.get)
-                if scores[best_loc] > 0: return best_loc
-                return None
-        except: return None
-    
-    def auto_load_folder(self):
-        folder_path = filedialog.askdirectory(title="Select Download Folder")
-        if not folder_path: return
-        
-        try:
-            all_files = [os.path.join(folder_path, f) for f in os.listdir(folder_path) if f.lower().endswith(('.csv', '.xlsx', '.xlsm')) and not f.startswith('~$')]
-            all_files.sort(key=os.path.getmtime, reverse=True)
-        except OSError as e:
-            messagebox.showerror("Error", f"Could not read folder: {e}")
-            return
-        
-        self.log(f"🕵️ Scanning {len(all_files)} files...")
-        assigned = {'inventory': 0, 'sales': 0, 'po': 0, 'aglc': 0, 'hill': 0, 'valley': 0, 'jasper': 0}
-        found_types = []
-        
-        for full_path in all_files:
-            filename = os.path.basename(full_path).lower()
-            if "inventory-export" in filename and 'inventory' not in found_types:
-                self.files['inventory'].set(full_path); assigned['inventory'] += 1; found_types.append('inventory'); self.log(f" -> Found Inventory: {filename}")
-            elif "product-sales" in filename and 'sales' not in found_types:
-                self.files['sales'].set(full_path); assigned['sales'] += 1; found_types.append('sales'); self.log(f" -> Found Sales: {filename}")
-            elif "purchase-order" in filename and 'po' not in found_types:
-                self.files['po'].set(full_path); assigned['po'] += 1; found_types.append('po'); self.log(f" -> Found PO: {filename}")
-            elif ("manual" in filename or "retailers" in filename) and "order" in filename and 'aglc' not in found_types:
-                self.files['aglc'].set(full_path); assigned['aglc'] += 1; found_types.append('aglc'); self.log(f" -> Found AGLC: {filename}")
-            elif "transfer" in filename:
-                loc = self.peek_transfer_location(full_path)
-                if loc and loc not in found_types:
-                    self.files[loc].set(full_path); assigned[loc] += 1; found_types.append(loc); self.log(f" -> Found {loc.title()} Transfer: {filename}")
-        
-        self.save_paths()
-        messagebox.showinfo("Scan Report", f"Found {sum(assigned.values())} matching files.")
-    
-    def run_ingest_thread(self):
-        """Runs the Ingest process in a separate thread."""
-        self.log("--- 🧠 Starting Memory Bank Ingest ---")
-        t = threading.Thread(target=self._ingest_wrapper, daemon=True)
-        t.start()
-
-    def _ingest_wrapper(self):
-        try:
-            config = load_config()
-            hist_path = config.get('settings', {}).get('history_folder', '')
-            if not hist_path:
-                self.log("❌ ERROR: Memory Bank folder not configured! Go to Settings.")
-                return
-            hh_ingest.update_memory_bank(self.log)
-            self.log("--- Ingest Complete ---")
+                self.log_txt.insert(tk.END, f"[{ts}] {msg}\n")
+                self.log_txt.see(tk.END)
+                self.log_txt.config(state='disabled')
+        except queue.Empty:
+            pass
         except Exception as e:
-            self.log(f"❌ Ingest Error: {e}")
+            print(f"Log processing error: {e}")
+        self.root.after(100, self._process_log_queue)
+
+    def auto_load(self):
+        d = filedialog.askdirectory()
+        if not d: return
+        self.log(f"Scanning directory: {d}...")
+        try:
+            files = [os.path.join(d,f) for f in os.listdir(d) if f.lower().endswith(('.csv','.xlsx'))]
+            found = 0
+            for f in files:
+                n = os.path.basename(f).lower()
+                if "inventory-export" in n: self.files['inventory'].set(f); found+=1
+                elif "product-sales" in n: self.files['sales'].set(f); found+=1
+                elif "purchase-order" in n: self.files['po'].set(f); found+=1
+                elif "manual" in n and "order" in n: self.files['aglc'].set(f); found+=1
+                elif "transfer" in n:
+                    for lid, lvar in self.loc_files.items():
+                        if lid in n: lvar.set(f); found+=1
+            self.save_paths()
+            self.log(f"Auto-load complete. Mapped {found} files.")
+        except Exception as e:
+            self.log(f"Error during auto-load: {e}")
+
+    def run_ingest(self):
+        self.log("Initializing data synchronization...")
+        threading.Thread(target=lambda: bb_ingest.update_memory_bank(self.log), daemon=True).start()
 
     def open_settings(self):
+        # Reusing your existing logic but ensuring it spawns correctly
         top = tk.Toplevel(self.root)
-        top.title("Settings")
-        top.geometry("600x750")
-        self.entry_widgets = {}
+        top.title("System Configuration")
+        top.geometry("600x700")
         
-        def make_inp(parent, label, key, val, row):
-            ttk.Label(parent, text=label).grid(row=row, column=0, sticky='w', pady=2)
-            e = ttk.Entry(parent)
-            e.insert(0, str(val))
-            e.grid(row=row, column=1, sticky='ew', padx=5, pady=2)
-            self.entry_widgets[key] = e
+        sets = self.config.get_settings()
+        entries = {}
         
-        curr_sets = self.config_data.get('settings', DEFAULT_SETTINGS)
+        def add_sec(title, key):
+            lf = ttk.LabelFrame(top, text=f" {title} ", padding=10)
+            lf.pack(fill=tk.X, padx=10, pady=5)
+            for subk, val in sets.get(key, {}).items():
+                if isinstance(val, (int, float)):
+                    f = ttk.Frame(lf)
+                    f.pack(fill=tk.X, pady=2)
+                    ttk.Label(f, text=subk.replace('_', ' ').title(), width=25).pack(side=tk.LEFT)
+                    e = ttk.Entry(f)
+                    e.insert(0, val)
+                    e.pack(side=tk.RIGHT, expand=True, fill=tk.X)
+                    entries[f"{key}.{subk}"] = e
         
-        # Cannabis Rules
-        lf_can = ttk.LabelFrame(top, text="Cannabis Logic", padding=10)
-        lf_can.pack(fill=tk.X, padx=10, pady=5)
-        c_rules = curr_sets.get('cannabis_logic', DEFAULT_SETTINGS['cannabis_logic'])
-        make_inp(lf_can, "Hot Velocity:", 'c_hot', c_rules['hot_velocity'], 0)
-        make_inp(lf_can, "Reorder Point:", 'c_reorder', c_rules['reorder_point'], 1)
-        make_inp(lf_can, "Target WOS:", 'c_target', c_rules.get('target_wos', 4.0), 2)
-        make_inp(lf_can, "Dead WOS:", 'c_dead_wos', c_rules.get('dead_wos', 26), 3)
-        make_inp(lf_can, "Dead Stock:", 'c_dead_oh', c_rules.get('dead_on_hand', 5), 4)
+        add_sec("Cannabis Rules", "cannabis_logic")
+        add_sec("Accessory Rules", "accessory_logic")
         
-        # Accessory Rules
-        lf_acc = ttk.LabelFrame(top, text="Accessory Logic", padding=10)
-        lf_acc.pack(fill=tk.X, padx=10, pady=5)
-        a_rules = curr_sets.get('accessory_logic', DEFAULT_SETTINGS['accessory_logic'])
-        make_inp(lf_acc, "Hot Velocity:", 'a_hot', a_rules['hot_velocity'], 0)
-        make_inp(lf_acc, "Reorder Point:", 'a_reorder', a_rules['reorder_point'], 1)
-        make_inp(lf_acc, "Target WOS:", 'a_target', a_rules.get('target_wos', 8.0), 2)
-        make_inp(lf_acc, "Dead WOS:", 'a_dead_wos', a_rules.get('dead_wos', 52), 3)
-        make_inp(lf_acc, "Dead Stock:", 'a_dead_oh', a_rules.get('dead_on_hand', 3), 4)
-
-        # History Settings (Updated)
-        lf_hist = ttk.LabelFrame(top, text="Workflow Settings", padding=10)
-        lf_hist.pack(fill=tk.X, padx=10, pady=5)
-        lf_hist.columnconfigure(1, weight=1)
-        
-        # 1. Memory Bank
-        curr_hist_folder = curr_sets.get('history_folder', '')
-        ttk.Label(lf_hist, text="Memory Bank Folder:").grid(row=0, column=0, sticky='w', pady=2)
-        hist_entry = ttk.Entry(lf_hist)
-        hist_entry.insert(0, curr_hist_folder)
-        hist_entry.grid(row=0, column=1, sticky='ew', padx=5, pady=2)
-        
-        def browse_history():
-            folder = filedialog.askdirectory(title="Select MEMORYBANK Folder")
-            if folder:
-                hist_entry.delete(0, tk.END)
-                hist_entry.insert(0, folder)
-        ttk.Button(lf_hist, text="Browse", command=browse_history).grid(row=0, column=2, padx=5)
-        ttk.Label(lf_hist, text="(Storage for Master DB)", style="Sub.TLabel").grid(row=1, column=0, columnspan=3, sticky='w', pady=(0, 10))
-
-        # 2. Ingest Source
-        curr_ingest_folder = curr_sets.get('ingest_folder', '')
-        ttk.Label(lf_hist, text="Downloads Folder:").grid(row=2, column=0, sticky='w', pady=2)
-        ingest_entry = ttk.Entry(lf_hist)
-        ingest_entry.insert(0, curr_ingest_folder)
-        ingest_entry.grid(row=2, column=1, sticky='ew', padx=5, pady=2)
-        
-        def browse_ingest():
-            folder = filedialog.askdirectory(title="Select Downloads Folder")
-            if folder:
-                ingest_entry.delete(0, tk.END)
-                ingest_entry.insert(0, folder)
-        ttk.Button(lf_hist, text="Browse", command=browse_ingest).grid(row=2, column=2, padx=5)
-        ttk.Label(lf_hist, text="(Leave empty to auto-detect Downloads)", style="Sub.TLabel").grid(row=3, column=0, columnspan=3, sticky='w', pady=2)
-
-        def save_close():
+        # Save Button
+        def save():
             try:
-                new_settings = self.config_data.get('settings', DEFAULT_SETTINGS)
-                # Save Logic
-                new_settings['cannabis_logic'].update({
-                    'hot_velocity': float(self.entry_widgets['c_hot'].get()),
-                    'reorder_point': float(self.entry_widgets['c_reorder'].get()),
-                    'target_wos': float(self.entry_widgets['c_target'].get()),
-                    'dead_wos': float(self.entry_widgets['c_dead_wos'].get()),
-                    'dead_on_hand': float(self.entry_widgets['c_dead_oh'].get())
-                })
-                new_settings['accessory_logic'].update({
-                    'hot_velocity': float(self.entry_widgets['a_hot'].get()),
-                    'reorder_point': float(self.entry_widgets['a_reorder'].get()),
-                    'target_wos': float(self.entry_widgets['a_target'].get()),
-                    'dead_wos': float(self.entry_widgets['a_dead_wos'].get()),
-                    'dead_on_hand': float(self.entry_widgets['a_dead_oh'].get())
-                })
-                # Save Paths
-                new_settings['history_folder'] = hist_entry.get()
-                new_settings['ingest_folder'] = ingest_entry.get()
-                
-                self.config_data['settings'] = new_settings
-                save_config(self.config_data)
+                new_s = sets.copy()
+                for k, e in entries.items():
+                    val = e.get()
+                    if '.' in k:
+                        sec, sub = k.split('.')
+                        new_s[sec][sub] = float(val)
+                self.config.update_settings(new_s)
                 top.destroy()
-            except ValueError: messagebox.showerror("Error", "Values must be numbers.")
-        
-        ttk.Button(top, text="Save Configuration", command=save_close).pack(pady=10, fill=tk.X, padx=20)
-    
-    def start_processing(self):
+                self.log("Configuration updated successfully.")
+            except Exception as ex: messagebox.showerror("Config Error", str(ex))
+            
+        ttk.Button(top, text="SAVE CONFIGURATION", command=save).pack(pady=20, fill=tk.X, padx=20)
+
+    def start_run(self):
         if not self.files['inventory'].get() or not self.files['sales'].get():
-            messagebox.showerror("Missing Files", "Inventory and Sales files are mandatory.")
+            messagebox.showerror("Input Error", "Inventory and Sales files are required for analysis.")
             return
         
-        self.run_btn.config(state='disabled')
-        self.progress.start(10)
-        self.log_area.config(state='normal')
-        self.log_area.delete(1.0, tk.END)
-        self.log_area.config(state='disabled')
-        
         paths = {k: v.get() for k, v in self.files.items()}
-        settings = self.config_data.get('settings', DEFAULT_SETTINGS)
-        report_days = self.report_days.get()
+        paths.update({k: v.get() for k, v in self.loc_files.items()})
+        settings = self.config.get_settings()
         
-        t = threading.Thread(
-            target=run_logic_pandas,
-            args=(paths, settings, report_days, self.log, self.on_finish),
+        self.btn_run.config(state='disabled')
+        self.prog.start(10)
+        
+        threading.Thread(
+            target=run_logic_pandas, 
+            args=(paths, settings, self.report_days.get(), self.log, self.done), 
             daemon=True
-        )
-        t.start()
-    
-    def on_finish(self, success):
-        self.progress.stop()
-        self.run_btn.config(state='normal')
-        if success: messagebox.showinfo("Success", "Analysis Complete!")
-        else: messagebox.showerror("Error", "Analysis failed. Check log.")
+        ).start()
+
+    def done(self, ok):
+        self.prog.stop()
+        self.btn_run.config(state='normal')
+        if ok: 
+            messagebox.showinfo("Success", "Analysis Complete. Report generated.")
+        else: 
+            messagebox.showerror("Failure", "Analysis failed. Please check the system log.")
