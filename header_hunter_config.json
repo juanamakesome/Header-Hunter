@@ -1,0 +1,39 @@
+{
+    "settings": {
+        "cannabis_logic": {
+            "hot_velocity": 2.0,
+            "reorder_point": 1.0,
+            "target_wos": 2.0,
+            "dead_wos": 10,
+            "dead_on_hand": 5
+        },
+        "accessory_logic": {
+            "hot_velocity": 0.5,
+            "reorder_point": 4.0,
+            "target_wos": 8.0,
+            "dead_wos": 52,
+            "dead_on_hand": 3
+        },
+        "column_mapping": {
+            "sku": "SKU",
+            "description": "Product Name",
+            "category": "Category",
+            "brand": "Brand",
+            "qty_sold": "Quantity",
+            "net_sales": "Net sales",
+            "gross_sales": "Gross sales",
+            "profit": "Profit",
+            "inventory_sku": "SKU"
+        },
+        "po_destination": "J"
+    },
+    "paths": {
+        "aglc": "G:/My Drive/Git stuff done/v8.0/test/CannabisRetailersManualOrderForm.xlsm",
+        "sales": "G:/My Drive/Git stuff done/v8.0/test/product-sales-over-time-Sun Nov 30 2025 00_00_00 GMT-0700 (Mountain Standard Time)-Tue Dec 30 2025 23_59_59 GMT-0700 (Mountain Standard Time).csv",
+        "inventory": "G:/My Drive/Git stuff done/v8.0/test/inventory-export-2025-12-31.csv",
+        "po": "G:/My Drive/Git stuff done/v8.0/test/purchase-order-P0001227-HktKtjy4Zx.csv",
+        "hill": "G:/My Drive/Git stuff done/v8.0/test/transfer-B1X3v9xNWg-pending.csv",
+        "valley": "G:/My Drive/Git stuff done/v8.0/test/transfer-HJHiwclV-g-pending.csv",
+        "jasper": "G:/My Drive/Git stuff done/v8.0/test/transfer-rya4LqlEWx-pending.csv"
+    }
+}
