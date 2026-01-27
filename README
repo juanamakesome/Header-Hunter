@@ -1,0 +1,50 @@
+Overview
+Header Hunter is a Python-based inventory intelligence tool designed to automate purchasing decisions for high-volume retail environments. It processes raw inventory reports using customizable risk logic (via business_rules.py) to generate optimized procurement orders, minimizing stockouts and overstock risks.
+
+Key Value Proposition: Demonstrates the core workflow of a Merchant Risk Analyst:
+Ingest Data → Validate Integrity → Apply Risk Logic → Automate Decision
+
+Architecture & Tech Stack
+Core Logic: Python 3.10+
+Data Processing: Pandas (Dataframes), OpenPyXL (Excel Automation)
+Architecture: Modular design separating Business Logic from Data Ingestion
+
+Key Modules (Risk Analysis Focus)
+File	Function	Analogy
+business_rules.py	Defines reordering thresholds (e.g., "If < 2 weeks supply, buy")	Underwriting Policy: Defining the "Credit Box" for approval
+hh_logic.py	Decision engine processing velocity vs. stock levels	Risk Modeling: Calculating stockout probability (Default)
+excel_validation.py	Cleans raw reports (null values, invalid formats)	Data Pipelines: Ensuring model inputs are clean (ETL)
+hh_gui_modern.py	Front-end interface for non-technical users (Store Managers)	Tooling: Building internal dashboards for Ops teams
+
+Logic Flow (Kowalski Protocol)
+Ingest:
+System reads raw .xlsx exports from POS systems.
+
+Clean:
+data_manager.py normalizes SKU formats and filters corrupted rows.
+
+Analyze:
+hh_logic.py calculates Sales Velocity (Burn Rate) per SKU.
+
+Decide:
+business_rules.py flags inventory status:
+
+Critical: < 3 days supply (stockout imminent)
+Warning: < 14 days supply (needs reordering)
+Healthy: No immediate action required
+Dead: No sales for the month
+Cold: Low sales for the month
+Hot: High sales for the month
+Output:
+Generates a formatted Purchase Order for vendor submission.
+
+Future Roadmap
+SQL Integration:
+Migrate flat-file CSV storage to PostgreSQL for historical trend analysis.
+
+Agentic Risk:
+Implement LLM-based agents to parse unstructured vendor communications for supply chain disruptions.
+
+API Integration.
+
+Created by Rodney Lemay (https://github.com/juanamakesome)
